@@ -97,7 +97,7 @@ vmess://base64...
 ### ❤️ Support & Join Telegram
 
 🌐 [KP CHANNEL Official](https://t.me/KP_CHANNEL_KP)  
-💬 [KP Group](https://t.me/KP_GROUP_KP)  
+💬 [KP GROUP](https://t.me/KP_GROUP_KP)  
 
 ⭐ **Star this repo if you love the project** —  
 your support keeps the KP ecosystem growing stronger!  
