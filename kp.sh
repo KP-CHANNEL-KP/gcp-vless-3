@@ -270,9 +270,9 @@ JSON
 }
 
 case "$PROTO" in
-  trojan-ws)  URI="trojan://${TROJAN_PASS}@vpn.googleapis.com:443?path=%2FKP-CHANNEL&security=tls&host=${CANONICAL_HOST}&type=ws#Trojan-WS" ;;
-  vless-ws)   URI="vless://${VLESS_UUID}@vpn.googleapis.com:443?path=%2FKP-CHANNEL&security=tls&encryption=none&host=${CANONICAL_HOST}&type=ws#Vless-WS" ;;
-  vless-grpc) URI="vless://${VLESS_UUID_GRPC}@vpn.googleapis.com:443?mode=gun&security=tls&encryption=none&type=grpc&serviceName=kpchannel-grpc&sni=${CANONICAL_HOST}#VLESS-gRPC" ;;
+  trojan-ws)  URI="trojan://${TROJAN_PASS}@vpn.googleapis.com:443?path=%2FKP-CHANNEL&security=tls&host=${CANONICAL_HOST}&type=ws#KP CHANNEL MYTEL BYPASS GCP" ;;
+  vless-ws)   URI="vless://${VLESS_UUID}@vpn.googleapis.com:443?path=%2FKP-CHANNEL&security=tls&encryption=none&host=${CANONICAL_HOST}&type=ws#KP CHANNEL MYTEL BYPASS GCP" ;;
+  vless-grpc) URI="vless://${VLESS_UUID_GRPC}@vpn.googleapis.com:443?mode=gun&security=tls&encryption=none&type=grpc&serviceName=kpchannel-grpc&sni=${CANONICAL_HOST}#KP CHANNEL MYTEL BYPASS GCP" ;;
   vmess-ws)   URI="$(make_vmess_ws_uri "${CANONICAL_HOST}")" ;;
 esac
 
