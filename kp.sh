@@ -98,7 +98,7 @@ select_protocol() {
         
         case $proto_choice in
             # VLESS Image ကို Error မှ တွေ့ရှိသည့် v1:latest (သို့မဟုတ်) မှန်ကန်သည်ဟု ယူဆရသည့် path ဖြင့် ပြောင်းလဲ
-            1) PROTO="vless-ws"; IMAGE="docker.io/kpchannel/v1:latest"; break ;;
+            1) PROTO="vless-ws"; IMAGE="docker.io/kpchannel/vl:latest"; break ;;
             2) PROTO="trojan-ws"; IMAGE="docker.io/kpchannel/tr:latest"; break ;;
             3) PROTO="vmess-ws"; IMAGE="docker.io/kpchannel/vmess:latest"; break ;;
             *) echo "Invalid selection. Please enter a number between 1-3." ;;
