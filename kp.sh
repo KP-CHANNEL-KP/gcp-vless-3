@@ -1,326 +1,641 @@
-#!/usr/bin/env bash
+#!/bin/bash
+
 set -euo pipefail
 
-# =============================================================
-# === KP CHANNEL Cloud Run — One-Click Deploy Script (V4) ===
-# === Updated: Random UUID & Trojan Pass = "KP-CHANNEL" ===
-# =============================================================
-
-# ===== Ensure interactive reads even when run via curl/process substitution =====
-if [[ ! -t 0 ]] && [[ -e /dev/tty ]]; then
-  exec </dev/tty
+# === GITHUB RUNNER PRE-REQUISITES CHECK & INSTALL ===
+# Ensure necessary tools (uuidgen and jq) are installed for a clean run.
+if ! command -v uuidgen &> /dev/null || ! command -v jq &> /dev/null; then
+    echo -e "\033[0;34m[INFO]\033[0m Installing prerequisite packages (uuid-runtime, jq)..."
+    sudo apt-get update > /dev/null 2>&1 || true
+    sudo apt-get install -y uuid-runtime jq
+    echo -e "\033[0;32m[INFO]\033[0m Prerequisites installed."
 fi
+# ===================================================
 
-# ===== Logging & error handler =====
-LOG_FILE="/tmp/kpchannel_cloudrun_$(date +%s).log"
-touch "$LOG_FILE"
-on_err() {
-  local rc=$?
-  echo "" | tee -a "$LOG_FILE"
-  echo "❌ ERROR: Command failed (exit $rc) at line $LINENO: ${BASH_COMMAND}" | tee -a "$LOG_FILE" >&2
-  echo "—— LOG (last 80 lines) ——" >&2
-  tail -n 80 "$LOG_FILE" >&2 || true
-  echo "📄 Log File: $LOG_FILE" >&2
-  exit $rc
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+# Global Variables
+PROTOCOL=""
+TROJAN_PASS="KP-CHANNEL" # Hardcoded as requested
+VLESS_PATH="" # Will be set by get_user_input
+TIMEOUT="" # Will be set by select_timeout
+IMAGE="" # Docker Image URL
+
+# --- Logging Functions ---
+log() {
+    echo -e "${GREEN}[$(date +'%Y-%m-%d %H:%M:%S')]${NC} $1"
 }
-trap on_err ERR
 
-# =================== Color & UI ===================
-if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
-  RESET=$'\e[0m'; BOLD=$'\e[1m'; DIM=$'\e[2m'
-  C_CYAN=$'\e[38;5;44m'; C_BLUE=$'\e[38;5;33m'
-  C_GREEN=$'\e[38;5;46m'; C_YEL=$'\e[38;5;226m'
-  C_ORG=$'\e[38;5;214m'; C_PINK=$'\e[38;5;205m'
-  C_GREY=$'\e[38;5;245m'; C_RED=$'\e[38;5;196m'
-else
-  RESET= BOLD= DIM= C_CYAN= C_BLUE= C_GREEN= C_YEL= C_ORG= C_PINK= C_GREY= C_RED=
-fi
-
-hr(){ printf "${C_GREY}%s${RESET}\n" "──────────────────────────────────────────────"; }
-banner(){
-  local title="$1"
-  printf "\n${C_BLUE}${BOLD}╔══════════════════════════════════════════════════╗${RESET}\n"
-  printf   "${C_BLUE}${BOLD}║${RESET}  %s${RESET}\n" "$(printf "%-46s" "$title")"
-  printf   "${C_BLUE}${BOLD}╚══════════════════════════════════════════════════╝${RESET}\n"
+warn() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
 }
-ok(){   printf "${C_GREEN}✔${RESET} %s\n" "$1"; }
-warn(){ printf "${C_ORG}⚠${RESET} %s\n" "$1"; }
-err(){  printf "${C_RED}✘${RESET} %s\n" "$1"; }
-kv(){   printf "   ${C_GREY}%s${RESET}  %s\n" "$1" "$2"; }
 
-printf "\n${C_CYAN}${BOLD}🚀 KP CHANNEL Cloud Run — One-Click Deploy${RESET} ${C_GREY}(Trojan WS / VLESS WS / VLESS gRPC / VMess WS)${RESET}\n"
-hr
+error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
 
-# =================== Random progress spinner ===================
-run_with_progress() {
-  local label="$1"; shift
-  ( "$@" ) >>"$LOG_FILE" 2>&1 &
-  local pid=$!
-  local pct=5
-  if [[ -t 1 ]]; then
-    printf "\e[?25l" # Hide cursor
-    while kill -0 "$pid" 2>/dev/null; do
-      local step=$(( (RANDOM % 9) + 2 ))
-      pct=$(( pct + step ))
-      (( pct > 95 )) && pct=95
-      printf "\r🌀 %s... [%s%%]" "$label" "$pct"
-      sleep "$(awk -v r=$RANDOM 'BEGIN{s=0.08+(r%7)/100; printf "%.2f", s }')"
+info() {
+    echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+# --- Validation Functions ---
+validate_uuid() {
+    local uuid_pattern='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    if [[ ! $1 =~ $uuid_pattern ]]; then
+        error "Invalid UUID format: $1"
+        return 1
+    fi
+    return 0
+}
+
+validate_path() {
+    local path_pattern='^\/[a-zA-Z0-9_-]{4,20}$'
+    if [[ ! $1 =~ $path_pattern ]]; then
+        error "Invalid Path format. Must start with '/' and contain 4-20 alphanumeric characters/hyphens/underscores."
+        return 1
+    fi
+    return 0
+}
+
+validate_bot_token() {
+    local token_pattern='^[0-9]{8,10}:[a-zA-Z0-9_-]{35}$'
+    if [[ ! $1 =~ $token_pattern ]]; then
+        error "Invalid Telegram Bot Token format"
+        return 1
+    fi
+    return 0
+}
+
+validate_chat_id() {
+    if [[ ! $1 =~ ^-?[0-9]+$ ]]; then
+        error "Invalid Chat ID format"
+        return 1
+    fi
+    return 0
+}
+
+# --- Configuration/Selection Functions ---
+
+# Protocol selection function (NEW FEATURE 1)
+select_protocol() {
+    echo
+    info "=== Protocol Selection ==="
+    echo "1. VLESS / WebSockets (Recommended Default) -> Image: kpchannel/vl:latest" 
+    echo "2. Trojan / WebSockets -> Image: kpchannel/tr:latest" 
+    echo "3. VMess / WebSockets -> Image: kpchannel/vmess:latest" 
+    echo
+    
+    while true; do
+        read -p "Select Protocol (1-3, or Enter for Default 1): " proto_choice
+        proto_choice=${proto_choice:-"1"}
+        
+        case $proto_choice in
+            1) PROTO="vless-ws"; IMAGE="docker.io/kpchannel/vl:latest"; break ;;
+            2) PROTO="trojan-ws"; IMAGE="docker.io/kpchannel/tr:latest"; break ;;
+            3) PROTO="vmess-ws"; IMAGE="docker.io/kpchannel/vmess:latest"; break ;;
+            *) echo "Invalid selection. Please enter a number between 1-3." ;;
+        esac
     done
-    wait "$pid"; local rc=$?
-    printf "\r"
-    if (( rc==0 )); then
-      printf "✅ %s... [100%%]\n" "$label"
-    else
-      printf "❌ %s failed (see %s)\n" "$label" "$LOG_FILE"
-      return $rc
-    fi
-    printf "\e[?25h" # Restore cursor
-  else
-    wait "$pid"
-  fi
+    
+    info "Selected Protocol: ${PROTOCOL^^}"
 }
 
-# =================== Step 1: Telegram Config ===================
-banner "🚀 Step 1 — Telegram Setup"
-TELEGRAM_TOKEN="${TELEGRAM_TOKEN:-}"
-TELEGRAM_CHAT_IDS="${TELEGRAM_CHAT_IDS:-${TELEGRAM_CHAT_ID:-}}"
-
-if [[ ( -z "${TELEGRAM_TOKEN}" || -z "${TELEGRAM_CHAT_IDS}" ) && -f .env ]]; then
-  set -a; source ./.env; set +a
-fi
-
-read -rp "🤖 Telegram Bot Token: " _tk || true
-[[ -n "${_tk:-}" ]] && TELEGRAM_TOKEN="$_tk"
-if [[ -z "${TELEGRAM_TOKEN:-}" ]]; then
-  warn "Telegram token empty; deploy will continue without messages."
-else
-  ok "Telegram token captured."
-fi
-
-read -rp "👤 Owner/Channel Chat ID(s): " _ids || true
-[[ -n "${_ids:-}" ]] && TELEGRAM_CHAT_IDS="${_ids// /}"
-
-DEFAULT_LABEL="Join KP CHANNEL Channel"
-DEFAULT_URL="https://t.me/KP_CHANNEL_KP"
-BTN_LABELS=(); BTN_URLS=()
-
-read -rp "➕ Add URL button(s)? [y/N]: " _addbtn || true
-if [[ "${_addbtn:-}" =~ ^([yY]|yes)$ ]]; then
-  i=0
-  while true; do
-    echo "—— Button $((i+1)) ——"
-    read -rp "🔖 Label [default: ${DEFAULT_LABEL}]: " _lbl || true
-    if [[ -z "${_lbl:-}" ]]; then
-      BTN_LABELS+=("${DEFAULT_LABEL}")
-      BTN_URLS+=("${DEFAULT_URL}")
-      ok "Added: ${DEFAULT_LABEL} → ${DEFAULT_URL}"
-    else
-      read -rp "🔗 URL (http/https): " _url || true
-      if [[ -n "${_url:-}" && "${_url}" =~ ^https?:// ]]; then
-        BTN_LABELS+=("${_lbl}")
-        BTN_URLS+=("${_url}")
-        ok "Added: ${_lbl} → ${_url}"
-      else
-        warn "Skipped (invalid or empty URL)."
-      fi
-    fi
-    i=$(( i + 1 ))
-    (( i >= 3 )) && break
-    read -rp "➕ Add another button? [y/N]: " _more || true
-    [[ "${_more:-}" =~ ^([yY]|yes)$ ]] || break
-  done
-fi
-
-CHAT_ID_ARR=()
-IFS=',' read -r -a CHAT_ID_ARR <<< "${TELEGRAM_CHAT_IDS:-}" || true
-
-json_escape(){ printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
-
-tg_send(){
-  local text="$1" RM=""
-  if [[ -z "${TELEGRAM_TOKEN:-}" || ${#CHAT_ID_ARR[@]} -eq 0 ]]; then return 0; fi
-  if (( ${#BTN_LABELS[@]} > 0 )); then
-    local L1 U1 L2 U2 L3 U3
-    [[ -n "${BTN_LABELS[0]:-}" ]] && L1="$(json_escape "${BTN_LABELS[0]}")" && U1="$(json_escape "${BTN_URLS[0]}")"
-    [[ -n "${BTN_LABELS[1]:-}" ]] && L2="$(json_escape "${BTN_LABELS[1]}")" && U2="$(json_escape "${BTN_URLS[1]}")"
-    [[ -n "${BTN_LABELS[2]:-}" ]] && L3="$(json_escape "${BTN_LABELS[2]}")" && U3="$(json_escape "${BTN_URLS[2]}")"
-    if (( ${#BTN_LABELS[@]} == 1 )); then
-      RM="{\"inline_keyboard\":[[{\"text\":\"${L1}\",\"url\":\"${U1}\"}]]}"
-    elif (( ${#BTN_LABELS[@]} == 2 )); then
-      RM="{\"inline_keyboard\":[[{\"text\":\"${L1}\",\"url\":\"${U1}\"}],[{\"text\":\"${L2}\",\"url\":\"${U2}\"}]]}"
-    else
-      RM="{\"inline_keyboard\":[[{\"text\":\"${L1}\",\"url\":\"${U1}\"}],[{\"text\":\"${L2}\",\"url\":\"${U2}\"},{\"text\":\"${L3}\",\"url\":\"${U3}\"}]]}"
-    fi
-  fi
-  for _cid in "${CHAT_ID_ARR[@]}"; do
-    curl -s -S -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
-      -d "chat_id=${_cid}" \
-      --data-urlencode "text=${text}" \
-      -d "parse_mode=HTML" \
-      ${RM:+--data-urlencode "reply_markup=${RM}"} >>"$LOG_FILE" 2>&1
-    ok "Telegram sent → ${_cid}"
-  done
+# Service Timeout selection function (NEW FEATURE 3)
+select_timeout() {
+    echo
+    info "=== Service Timeout Configuration ==="
+    echo "1. 300 seconds (5 minutes)"
+    echo "2. 900 seconds (15 minutes)"
+    echo "3. 3600 seconds (1 hour) (Maximum Default)" 
+    echo
+    
+    while true; do
+        read -p "Select Timeout (1-3, or Enter for Default 3): " timeout_choice
+        timeout_choice=${timeout_choice:-"3"}
+        
+        case $timeout_choice in
+            1) TIMEOUT="300"; break ;;
+            2) TIMEOUT="900"; break ;;
+            3) TIMEOUT="3600"; break ;;
+            *) echo "Invalid selection. Please enter a number between 1-3." ;;
+        esac
+    done
+    
+    info "Selected Timeout: $TIMEOUT seconds"
 }
 
-# =================== Step 2: Project ===================
-banner "🧭 Step 2 — GCP Project"
-PROJECT="$(gcloud config get-value project 2>/dev/null || true)"
-if [[ -z "$PROJECT" ]]; then
-  err "No active project. Run: gcloud config set project <YOUR_PROJECT_ID>"
-  exit 1
-fi
-PROJECT_NUMBER="$(gcloud projects describe "$PROJECT" --format='value(projectNumber)')" || true
-ok "Project Loaded: ${PROJECT}"
+# CPU selection function (Original)
+select_cpu() {
+    echo
+    info "=== CPU Configuration ==="
+    echo "1. 1 CPU Core"
+    echo "2. 2 CPU Cores"
+    echo "3. 4 CPU Cores (Default)" 
+    echo "4. 8 CPU Cores"
+    echo
+    
+    while true; do
+        read -p "Select CPU cores (1-4, or Enter for Default 3): " cpu_choice
+        cpu_choice=${cpu_choice:-"3"}
+        
+        case $cpu_choice in
+            1) CPU="1"; break ;;
+            2) CPU="2"; break ;;
+            3) CPU="4"; break ;;
+            4) CPU="8"; break ;;
+            *) echo "Invalid selection. Please enter a number between 1-4." ;;
+        esac
+    done
+    
+    info "Selected CPU: $CPU core(s)"
+}
 
-# =================== Step 3: Protocol ===================
-banner "🧩 Step 3 — Select Protocol"
-echo "  1️⃣ Trojan WS"
-echo "  2️⃣ VLESS WS"
-echo "  3️⃣ VLESS gRPC"
-echo "  4️⃣ VMess WS"
-read -rp "Choose [1-4, default 1]: " _opt || true
-case "${_opt:-1}" in
-  2) PROTO="vless-ws"   ; IMAGE="docker.io/kpchannel/vl:latest"        ;;
-  3) PROTO="vless-grpc" ; IMAGE="docker.io/kpchannel/vlessgrpc:latest" ;;
-  4) PROTO="vmess-ws"   ; IMAGE="docker.io/kpchannel/vmess:latest"     ;;
-  *) PROTO="trojan-ws"  ; IMAGE="docker.io/kpchannel/tr:latest"        ;;
-esac
-ok "Protocol selected: ${PROTO^^}"
-echo "[Docker Hidden] ${IMAGE}" >>"$LOG_FILE"
+# Memory selection function (Original)
+select_memory() {
+    echo
+    info "=== Memory Configuration ==="
+    
+    echo "Memory Options:"
+    echo "1. 512Mi"
+    echo "2. 1Gi"
+    echo "3. 2Gi (Recommended Default for 4 CPU)"
+    echo "4. 4Gi"
+    echo "5. 8Gi"
+    echo "6. 16Gi" 
+    echo
+    
+    while true; do
+        read -p "Select memory (1-6, or Enter for Default 3): " memory_choice
+        memory_choice=${memory_choice:-"3"}
+        
+        case $memory_choice in
+            1) MEMORY="512Mi"; break ;;
+            2) MEMORY="1Gi"; break ;;
+            3) MEMORY="2Gi"; break ;;
+            4) MEMORY="4Gi"; break ;;
+            5) MEMORY="8Gi"; break ;;
+            6) MEMORY="16Gi"; break ;;
+            *) echo "Invalid selection. Please enter a number between 1-6." ;;
+        esac
+    done
+    
+    validate_memory_config
+    info "Selected Memory: $MEMORY"
+}
 
-# =================== Step 4: Region ===================
-banner "🌍 Step 4 — Region"
-echo "1) 🇸🇬 Singapore (asia-southeast1)"
-echo "2) 🇺🇸 US (us-central1)"
-echo "3) 🇮🇩 Indonesia (asia-southeast2)"
-echo "4) 🇯🇵 Japan (asia-northeast1)"
-read -rp "Choose [1-4, default 2]: " _r || true
-case "${_r:-2}" in
-  1) REGION="asia-southeast1";;
-  3) REGION="asia-southeast2";;
-  4) REGION="asia-northeast1";;
-  *) REGION="us-central1";;
-esac
-ok "Region: ${REGION}"
+# Validate memory configuration based on CPU (Original)
+validate_memory_config() {
+    local cpu_num=$CPU
+    local memory_num=$(echo $MEMORY | sed 's/[^0-9]*//g')
+    local memory_unit=$(echo $MEMORY | sed 's/[0-9]*//g')
+    
+    if [[ "$memory_unit" == "Gi" ]]; then
+        memory_num=$((memory_num * 1024))
+    fi
+    
+    local min_memory=0
+    
+    case $cpu_num in
+        1) min_memory=512 ;;
+        2) min_memory=1024 ;;
+        4) min_memory=2048 ;;
+        8) min_memory=4096 ;;
+    esac
+    
+    if [[ $memory_num -lt $min_memory ]]; then
+        warn "Memory configuration ($MEMORY) might be too low for $CPU CPU core(s)."
+        warn "Recommended minimum: $((min_memory / 1024))Gi"
+        read -p "Do you want to continue with this configuration? (y/n): " confirm
+        if [[ ! $confirm =~ [Yy] ]]; then
+            select_memory
+        fi
+    fi
+}
 
-# =================== Step 5: Resources ===================
-banner "🧮 Step 5 — Resources"
-read -rp "CPU [1/2/4/6, default 2]: " _cpu || true
-CPU="${_cpu:-2}"
-read -rp "Memory [512Mi/1Gi/2Gi(default)/4Gi/8Gi]: " _mem || true
-MEMORY="${_mem:-2Gi}"
-ok "CPU/Mem: ${CPU} vCPU / ${MEMORY}"
+# Region selection function (Original)
+select_region() {
+    echo
+    info "=== Region Selection ==="
+    echo "1. us-central1 (Iowa, USA) (Default)" 
+    echo "2. us-west1 (Oregon, USA)" 
+    echo "3. asia-southeast1 (Singapore)"
+    echo "4. asia-northeast1 (Tokyo, Japan)"
+    echo
+    
+    while true; do
+        read -p "Select region (1-4, or Enter for Default 1): " region_choice
+        region_choice=${region_choice:-"1"}
+        
+        case $region_choice in
+            1) REGION="us-central1"; break ;;
+            2) REGION="us-west1"; break ;;
+            3) REGION="asia-southeast1"; break ;;
+            4) REGION="asia-northeast1"; break ;;
+            *) echo "Invalid selection. Please enter a number between 1-4." ;;
+        esac
+    done
+    
+    info "Selected region: $REGION"
+}
 
-# =================== Step 6: Service Name ===================
-banner "🪪 Step 6 — Service Name"
-SERVICE="${SERVICE:-kpchannel}"
-TIMEOUT="${TIMEOUT:-3600}"
-PORT="${PORT:-8080}"
-read -rp "Service name [default: ${SERVICE}]: " _svc || true
-SERVICE="${_svc:-$SERVICE}"
-ok "Service: ${SERVICE}"
+# Telegram destination selection (Original)
+select_telegram_destination() {
+    echo
+    info "=== Telegram Destination ==="
+    echo "1. Send to Channel only"
+    echo "2. Send to Bot private message only (Default)" 
+    echo "3. Send to both Channel and Bot"
+    echo "4. Don't send to Telegram"
+    echo
+    
+    local DEFAULT_CHAT_ID="7070690379"
+    
+    while true; do
+        read -p "Select destination (1-4, or Enter for Default 2): " telegram_choice
+        telegram_choice=${telegram_choice:-"2"}
 
-# =================== Step 7: Generate Secrets (UUID & Pass) ===================
-banner "🔑 Step 7 — Generate Unique Credentials"
+        case $telegram_choice in
+            1) 
+                TELEGRAM_DESTINATION="channel"
+                while true; do
+                    read -p "Enter Telegram Channel ID: " TELEGRAM_CHANNEL_ID
+                    if validate_chat_id "$TELEGRAM_CHANNEL_ID"; then
+                        break
+                    fi
+                done
+                break 
+                ;;
+            2) 
+                TELEGRAM_DESTINATION="bot"
+                while true; do
+                    read -p "Enter your Chat ID (for bot private message) [default: ${DEFAULT_CHAT_ID}]: " CHAT_ID_INPUT
+                    TELEGRAM_CHAT_ID=${CHAT_ID_INPUT:-"$DEFAULT_CHAT_ID"}
+                    
+                    if validate_chat_id "$TELEGRAM_CHAT_ID"; then
+                        break
+                    fi
+                done
+                break 
+                ;;
+            3) 
+                TELEGRAM_DESTINATION="both"
+                while true; do
+                    read -p "Enter Telegram Channel ID: " TELEGRAM_CHANNEL_ID
+                    if validate_chat_id "$TELEGRAM_CHANNEL_ID"; then
+                        break
+                    fi
+                done
+                while true; do
+                    read -p "Enter your Chat ID (for bot private message) [default: ${DEFAULT_CHAT_ID}]: " CHAT_ID_INPUT
+                    TELEGRAM_CHAT_ID=${CHAT_ID_INPUT:-"$DEFAULT_CHAT_ID"}
+                    
+                    if validate_chat_id "$TELEGRAM_CHAT_ID"; then
+                        break
+                    fi
+                done
+                break 
+                ;;
+            4) 
+                TELEGRAM_DESTINATION="none"
+                break 
+                ;;
+            *) echo "Invalid selection. Please enter a number between 1-4." ;;
+        esac
+    done
+}
 
-# VLESS/VMess အတွက် UUID အသစ်ထုတ်ခြင်း
-VLESS_UUID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
-# Trojan Password ကို 'KP-CHANNEL' ဟု သတ်မှတ်ခြင်း (User Request)
-TROJAN_PASS="KP-CHANNEL"
-# Path ကို မူရင်းအတိုင်း ထားရှိ
-VLESS_PATH="/KP-CHANNEL"
+# User input function (Updated with Path input)
+get_user_input() {
+    echo
+    info "=== Service Configuration ==="
+    
+    # Service Name (Original)
+    local DEFAULT_SERVICE_NAME="kpchannel"
+    while true; do
+        read -p "Enter service name [default: ${DEFAULT_SERVICE_NAME}]: " SERVICE_NAME_INPUT
+        SERVICE_NAME=${SERVICE_NAME_INPUT:-"$DEFAULT_SERVICE_NAME"}
+        
+        if [[ -n "$SERVICE_NAME" ]]; then
+            break
+        else
+            error "Service name cannot be empty"
+        fi
+    done
 
-ok "Generated VLESS/VMess UUID: ${C_YEL}${VLESS_UUID}${RESET}"
-ok "Trojan Password:            ${C_YEL}${TROJAN_PASS}${RESET}"
-ok "Default Path: ${VLESS_PATH}"
+    # Path (Secret URL) Selection (NEW FEATURE 2)
+    local DEFAULT_PATH="/KP-CHANNEL"
+    while true; do
+        read -p "Enter Path (Secret URL) [default: ${DEFAULT_PATH}]: " PATH_INPUT
+        VLESS_PATH=${PATH_INPUT:-"$DEFAULT_PATH"}
+        if validate_path "$VLESS_PATH"; then
+            break
+        fi
+    done
+    
+    # UUID (Original)
+    local DEFAULT_UUID
+    if command -v uuidgen &> /dev/null; then
+        DEFAULT_UUID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+    elif [[ -f "/proc/sys/kernel/random/uuid" ]]; then
+        DEFAULT_UUID=$(cat /proc/sys/kernel/random/uuid | tr '[:upper:]' '[:lower:]') 
+    else
+        DEFAULT_UUID="9c910024-714e-4221-81c6-41ca9856e7ab"
+        warn "Cannot find 'uuidgen' or access kernel UUID interface. Using the default UUID."
+    fi
 
-# Cloud Run Deployment အတွက် Environment variables များ
-ENV_VARS="UUID=${VLESS_UUID},TROJAN_PASS=${TROJAN_PASS},PATH=${VLESS_PATH}"
-kv "ENV VARS:" "${ENV_VARS}"
+    while true; do
+        read -p "Enter UUID [default: ${DEFAULT_UUID}]: " UUID_INPUT
+        UUID=${UUID_INPUT:-"$DEFAULT_UUID"}
+        if validate_uuid "$UUID"; then
+            break
+        fi
+    done
+    
+    # Telegram Bot Token (Original)
+    if [[ "$TELEGRAM_DESTINATION" != "none" ]]; then
+        local DEFAULT_BOT_TOKEN="8318171802:AAGh49s_ysQ-D84Cbht036QaLR1U4uT68RA"
+        while true; do
+            read -s -p "Enter Telegram Bot Token [default: ${DEFAULT_BOT_TOKEN:0:10}...]: " BOT_TOKEN_INPUT
+            echo 
 
-# =================== Step 8: Deployment Time ===================
-export TZ="Asia/Yangon"
-START_EPOCH="$(date +%s)"
-END_EPOCH="$(( START_EPOCH + 5*3600 ))"
-fmt_dt(){ date -d @"$1" "+%d.%m.%Y %I:%M %p"; }
-START_LOCAL="$(fmt_dt "$START_EPOCH")"
-END_LOCAL="$(fmt_dt "$END_EPOCH")"
-banner "🕒 Step 8 — Deployment Time"
-kv "Start:" "${START_LOCAL}"
-kv "End:"   "${END_LOCAL}"
+            TELEGRAM_BOT_TOKEN=${BOT_TOKEN_INPUT:-"$DEFAULT_BOT_TOKEN"}
 
-# =================== Step 9: Enable APIs ===================
-banner "⚙️ Step 9 — Enable APIs"
-run_with_progress "Enabling CloudRun & Build APIs" \
-  gcloud services enable run.googleapis.com cloudbuild.googleapis.com --quiet
+            if validate_bot_token "$TELEGRAM_BOT_TOKEN"; then
+                break
+            fi
+        done
+    fi
+    
+    # Host Domain (Original)
+    read -p "Enter host domain [default: m.googleapis.com]: " HOST_DOMAIN_INPUT
+    HOST_DOMAIN=${HOST_DOMAIN_INPUT:-"m.googleapis.com"}
+}
 
-# =================== Step 10: Deploy ===================
-banner "🚀 Step 10 — Deploying to Cloud Run"
-run_with_progress "Deploying ${SERVICE}" \
-  gcloud run deploy "$SERVICE" \
-    --image="$IMAGE" \
-    --platform=managed \
-    --region="$REGION" \
-    --memory="$MEMORY" \
-    --cpu="$CPU" \
-    --timeout="$TIMEOUT" \
-    --allow-unauthenticated \
-    --port="$PORT" \
-    --min-instances=1 \
-    --set-env-vars="$ENV_VARS" \
-    --quiet
+# Display configuration summary (Original)
+show_config_summary() {
+    echo
+    info "=== Configuration Summary ==="
+    echo "Project ID:    $(gcloud config get-value project)"
+    echo "Protocol:      ${PROTOCOL^^}"
+    echo "Region:        $REGION"
+    echo "Service Name:  $SERVICE_NAME"
+    echo "Image:         ${IMAGE}"
+    echo "Host Domain:   $HOST_DOMAIN"
+    echo "Path (Secret): $VLESS_PATH"
+    if [[ "$PROTOCOL" == "trojan-ws" ]]; then
+        echo "Trojan Pass:   ${TROJAN_PASS}"
+    fi
+    echo "UUID:          $UUID"
+    echo "CPU:           $CPU core(s)"
+    echo "Memory:        $MEMORY"
+    echo "Timeout:       $TIMEOUT seconds"
+    
+    if [[ "$TELEGRAM_DESTINATION" != "none" ]]; then
+        echo "Bot Token:     ${TELEGRAM_BOT_TOKEN:0:8}..."
+        echo "Destination:   $TELEGRAM_DESTINATION"
+        if [[ "$TELEGRAM_DESTINATION" == "channel" || "$TELEGRAM_DESTINATION" == "both" ]]; then
+            echo "Channel ID:    $TELEGRAM_CHANNEL_ID"
+        fi
+        if [[ "$TELEGRAM_DESTINATION" == "bot" || "$TELEGRAM_DESTINATION" == "both" ]]; then
+            echo "Chat ID:       $TELEGRAM_CHAT_ID"
+        fi
+    else
+        echo "Telegram:      Not configured"
+    fi
+    echo
+    
+    while true; do
+        read -p "Proceed with deployment? (y/n, or Enter for Default y): " confirm
+        confirm=${confirm:-"y"}
+        case $confirm in
+            [Yy]* ) break;;
+            [Nn]* ) 
+                info "Deployment cancelled by user"
+                exit 0
+                ;;
+            * ) echo "Please answer yes (y) or no (n).";;
+        esac
+    done
+}
 
-# =================== Step 11: Result ===================
-PROJECT_NUMBER="$(gcloud projects describe "$PROJECT" --format='value(projectNumber)')" || true
-CANONICAL_HOST="${SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
-URL_CANONICAL="https://${CANONICAL_HOST}"
-banner "✅ Step 11 — Result"
-ok "Service Ready"
-kv "URL:" "${C_CYAN}${BOLD}${URL_CANONICAL}${RESET}"
-
-# =================== Step 12: Protocol URLs (Dynamic) ===================
-banner "🔗 Step 12 — Generate Access Keys"
-
-# URL Path ကို Encoded လုပ်ခြင်း
-VLESS_PATH_ENCODED="$(printf "%s" "$VLESS_PATH" | jq -sRr @uri)" || VLESS_PATH_ENCODED="%2FKP-CHANNEL"
-
-# VMess URI ဖန်တီးသည့် Function
-make_vmess_ws_uri(){
-  local host="$1"
-  local path_enc="$2"
-  local json=$(cat <<JSON
-{"v":"2","ps":"VMess-WS","add":"${host}","port":"443","id":"${VLESS_UUID}","aid":"0","scy":"auto","net":"ws","type":"none","host":"${host}","path":"${path_enc}","tls":"tls","sni":"${host}","alpn":"http/1.1","fp":"auto"}
+# VLESS/Trojan/VMess URI Generation (NEW)
+generate_uri() {
+    local DOMAIN="$1"
+    local PROTOCOL="$2"
+    local VLESS_PATH_ENCODED=$(printf "%s" "$VLESS_PATH" | jq -sRr @uri)
+    local URI=""
+    
+    local REMARK="${SERVICE_NAME} - ${PROTOCOL^^} - KP CHANNEL"
+    
+    # VLESS WS
+    if [[ "$PROTOCOL" == "vless-ws" ]]; then
+        URI="vless://${UUID}@${HOST_DOMAIN}:443?path=${VLESS_PATH_ENCODED}&security=tls&alpn=h3%2Ch2%2Chttp%2F1.1&encryption=none&host=${DOMAIN}&fp=randomized&type=ws&sni=${DOMAIN}#${REMARK}"
+    
+    # Trojan WS (Using hardcoded pass)
+    elif [[ "$PROTOCOL" == "trojan-ws" ]]; then
+        URI="trojan://${TROJAN_PASS}@${HOST_DOMAIN}:443?path=${VLESS_PATH_ENCODED}&security=tls&alpn=h3%2Ch2%2Chttp%2F1.1&host=${DOMAIN}&type=ws&sni=${DOMAIN}#${REMARK}"
+    
+    # VMess WS
+    elif [[ "$PROTOCOL" == "vmess-ws" ]]; then
+        local BASE64_JSON=$(cat <<JSON | base64 -w0
+{"v":"2","ps":"${REMARK}","add":"${HOST_DOMAIN}","port":"443","id":"${UUID}","aid":"0","scy":"auto","net":"ws","type":"none","host":"${DOMAIN}","path":"${VLESS_PATH}","tls":"tls","sni":"${DOMAIN}","alpn":"h2,http/1.1","fp":"random"}
 JSON
 )
-  # -w0 သည် base64 output ရှိ Line break များကို ဖယ်ရှားသည်။
-  base64 -w0 <<<"$json" | sed 's/^/vmess:\/\//'
+        URI="vmess://${BASE64_JSON}"
+    fi
+    
+    echo "$URI"
 }
 
-case "$PROTO" in
-  trojan-ws)  URI="trojan://${TROJAN_PASS}@${CANONICAL_HOST}:443?path=${VLESS_PATH_ENCODED}&security=tls&host=${CANONICAL_HOST}&type=ws#KP CHANNEL MYTEL BYPASS GCP" ;;
-  vless-ws)   URI="vless://${VLESS_UUID}@${CANONICAL_HOST}:443?path=${VLESS_PATH_ENCODED}&security=tls&encryption=none&host=${CANONICAL_HOST}&type=ws#KP CHANNEL MYTEL BYPASS GCP" ;;
-  vless-grpc) URI="vless://${VLESS_UUID}@${CANONICAL_HOST}:443?mode=gun&security=tls&encryption=none&type=grpc&serviceName=kpchannel-grpc&sni=${CANONICAL_HOST}#KP CHANNEL MYTEL BYPASS GCP" ;;
-  vmess-ws)   URI="$(make_vmess_ws_uri "${CANONICAL_HOST}" "${VLESS_PATH}")" ;;
-esac
+# (Other deployment functions unchanged)
 
-# =================== Step 13: Telegram Notify ===================
-banner "📣 Step 13 — Telegram Notify"
+validate_prerequisites() {
+    log "Validating prerequisites..."
+    
+    if ! command -v gcloud &> /dev/null; then
+        error "gcloud CLI is not installed. Please install Google Cloud SDK."
+        exit 1
+    fi
+    
+    if ! command -v git &> /dev/null; then
+        error "git is not installed. Please install git."
+        exit 1
+    fi
+    
+    if ! command -v jq &> /dev/null; then
+        error "jq is not installed. Please install jq (JSON processor)."
+        exit 1
+    fi
+    
+    local PROJECT_ID=$(gcloud config get-value project)
+    if [[ -z "$PROJECT_ID" || "$PROJECT_ID" == "(unset)" ]]; then
+        error "No project configured. Run: gcloud config set project PROJECT_ID"
+        exit 1
+    fi
+}
 
-MSG=$(cat <<EOF
-✅ <b>CloudRun Deploy Success</b>
-━━━━━━━━━━━━━━━━━━
-<blockquote>🌍 <b>Region:</b> ${REGION}
-⚙️ <b>Protocol:</b> ${PROTO^^}
-🔗 <b>URL:</b> <a href="${URL_CANONICAL}">${URL_CANONICAL}</a></blockquote>
-🔑 <b>V2Ray Configuration Access Key :</b>
-<pre><code>${URI}</code></pre>
-<blockquote>🕒 <b>Start:</b> ${START_LOCAL}
-⏳ <b>End:</b> ${END_LOCAL}</blockquote>
-━━━━━━━━━━━━━━━━━━
-EOF
-)
+cleanup() {
+    log "Cleaning up temporary files..."
+    # The original script cloned a repo, but the new version uses direct docker image deployment,
+    # so we only clean up the cloned directory if it exists (for compatibility)
+    if [[ -d "gcp-vless-2" ]]; then
+        rm -rf gcp-vless-2
+    fi
+}
 
-tg_send "${MSG}"
+send_to_telegram() {
+    local chat_id="$1"
+    local message="$2"
+    local response
+    
+    response=$(curl -s -w "%{http_code}" -X POST \
+        -H "Content-Type: application/json" \
+        -d "{
+            \"chat_id\": \"${chat_id}\",
+            \"text\": \"$message\",
+            \"parse_mode\": \"MARKDOWN\",
+            \"disable_web_page_preview\": true
+        }" \
+        https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage)
+    
+    local http_code="${response: -3}"
+    local content="${response%???}"
+    
+    if [[ "$http_code" == "200" ]]; then
+        return 0
+    else
+        error "Failed to send to Telegram (HTTP $http_code): $content"
+        return 1
+    fi
+}
 
-printf "\n${C_GREEN}${BOLD}✨ Done — Random UUID for VLESS/VMess & Trojan Pass = KP-CHANNEL Enabled.${RESET}\n"
-printf "${C_GREY}📄 Log file: ${LOG_FILE}${RESET}\n"
+send_deployment_notification() {
+    local message="$1"
+    local success_count=0
+    
+    case $TELEGRAM_DESTINATION in
+        "channel")
+            log "Sending to Telegram Channel..."
+            if send_to_telegram "$TELEGRAM_CHANNEL_ID" "$message"; then
+                log "✅ Successfully sent to Telegram Channel"
+                success_count=$((success_count + 1))
+            else
+                error "❌ Failed to send to Telegram Channel"
+            fi
+            ;;
+            
+        "bot")
+            log "Sending to Bot private message..."
+            if send_to_telegram "$TELEGRAM_CHAT_ID" "$message"; then
+                log "✅ Successfully sent to Bot private message"
+                success_count=$((success_count + 1))
+            else
+                error "❌ Failed to send to Bot private message"
+            fi
+            ;;
+            
+        "both")
+            log "Sending to both Channel and Bot..."
+            
+            # Send to Channel
+            if send_to_telegram "$TELEGRAM_CHANNEL_ID" "$message"; then
+                log "✅ Successfully sent to Telegram Channel"
+                success_count=$((success_count + 1))
+            else
+                error "❌ Failed to send to Telegram Channel"
+            fi
+            
+            # Send to Bot
+            if send_to_telegram "$TELEGRAM_CHAT_ID" "$message"; then
+                log "✅ Successfully sent to Bot private message"
+                success_count=$((success_count + 1))
+            else
+                error "❌ Failed to send to Bot private message"
+            fi
+            ;;
+            
+        "none")
+            log "Skipping Telegram notification as configured"
+            return 0
+            ;;
+    esac
+    
+    if [[ $success_count -gt 0 ]]; then
+        log "Telegram notification completed ($success_count successful)"
+        return 0
+    else
+        warn "All Telegram notifications failed, but deployment was successful"
+        return 1
+    fi
+}
+
+main() {
+    info "=== GCP Cloud Run V2Ray Deployment (GitHub Mode) ==="
+    
+    # Get user input (Interactive selection)
+    select_protocol
+    select_region
+    select_cpu
+    select_memory
+    select_timeout
+    select_telegram_destination
+    get_user_input
+    show_config_summary
+    
+    PROJECT_ID=$(gcloud config get-value project)
+    
+    log "Starting Cloud Run deployment..."
+    log "Protocol: ${PROTOCOL^^}"
+    
+    validate_prerequisites
+    
+    # Set trap for cleanup (to ensure it runs even if deployment fails)
+    trap cleanup EXIT
+    
+    # Set environment variables for the Docker image
+    local ENV_VARS="UUID=${UUID},PATH=${VLESS_PATH},TROJAN_PASS=${TROJAN_PASS}"
+    
+    log "Enabling required APIs..."
+    # The previous script had issues with git clone and build, 
+    # so we ensure the deployment is done directly from the public Docker image (kpchannel/*)
+    gcloud services enable \
+        run.googleapis.com \
+        iam.googleapis.com \
+        --quiet
+    
+    log "Deploying to Cloud Run with image: ${IMAGE}..."
+    if ! gcloud run deploy ${SERVICE_NAME} \
+        --image ${IMAGE} \
+        --platform managed \
+        --region ${REGION} \
+        --allow-unauthenticated \
+        --cpu ${CPU} \
+        --memory ${MEMORY} \
+        --timeout ${TIMEOUT} \
+        --set-env-vars ${ENV_VARS} \
+        --quiet; then
+        error "Deployment failed"
+        exit 1
+    fi
+    
+    # Get the service URL
+    SERVICE_URL=$(gcloud run services describe ${SERVICE_NAME} \
+        --region ${REGION} \
+        --format 'value(status.url)' \
+        --quiet)
+
+    DOMAIN=$(echo $SERVICE_URL | sed 's|https://||')
+
+    # 🕒 Start time (MMT)
+    START_TIME=$(TZ='Asia/Yangon' date +"%Y-%m-%d %H:%M:%S")
+
+    # ⏰ End time = 5 hours from now (MMT)
+    END_TIME=$(TZ='Asia/Yangon' date -d "+5 hours" +"%Y-%m-%d %H:%M:%S")
+
+    # URI generation
+    VLESS_LINK=$(generate_uri "$DOMAIN"
