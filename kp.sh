@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# =============================================================
+# === KP CHANNEL Cloud Run — One-Click Deploy Script (V4) ===
+# === Updated: Random UUID & Trojan Pass = "KP-CHANNEL" ===
+# =============================================================
+
 # ===== Ensure interactive reads even when run via curl/process substitution =====
 if [[ ! -t 0 ]] && [[ -e /dev/tty ]]; then
   exec </dev/tty
@@ -53,7 +58,7 @@ run_with_progress() {
   local pid=$!
   local pct=5
   if [[ -t 1 ]]; then
-    printf "\e[?25l"
+    printf "\e[?25l" # Hide cursor
     while kill -0 "$pid" 2>/dev/null; do
       local step=$(( (RANDOM % 9) + 2 ))
       pct=$(( pct + step ))
@@ -69,7 +74,7 @@ run_with_progress() {
       printf "❌ %s failed (see %s)\n" "$label" "$LOG_FILE"
       return $rc
     fi
-    printf "\e[?25h"
+    printf "\e[?25h" # Restore cursor
   else
     wait "$pid"
   fi
@@ -215,24 +220,42 @@ read -rp "Service name [default: ${SERVICE}]: " _svc || true
 SERVICE="${_svc:-$SERVICE}"
 ok "Service: ${SERVICE}"
 
-# =================== Timezone Setup ===================
+# =================== Step 7: Generate Secrets (UUID & Pass) ===================
+banner "🔑 Step 7 — Generate Unique Credentials"
+
+# VLESS/VMess အတွက် UUID အသစ်ထုတ်ခြင်း
+VLESS_UUID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+# Trojan Password ကို 'KP-CHANNEL' ဟု သတ်မှတ်ခြင်း (User Request)
+TROJAN_PASS="KP-CHANNEL"
+# Path ကို မူရင်းအတိုင်း ထားရှိ
+VLESS_PATH="/KP-CHANNEL"
+
+ok "Generated VLESS/VMess UUID: ${C_YEL}${VLESS_UUID}${RESET}"
+ok "Trojan Password:            ${C_YEL}${TROJAN_PASS}${RESET}"
+ok "Default Path: ${VLESS_PATH}"
+
+# Cloud Run Deployment အတွက် Environment variables များ
+ENV_VARS="UUID=${VLESS_UUID},TROJAN_PASS=${TROJAN_PASS},PATH=${VLESS_PATH}"
+kv "ENV VARS:" "${ENV_VARS}"
+
+# =================== Step 8: Deployment Time ===================
 export TZ="Asia/Yangon"
 START_EPOCH="$(date +%s)"
 END_EPOCH="$(( START_EPOCH + 5*3600 ))"
 fmt_dt(){ date -d @"$1" "+%d.%m.%Y %I:%M %p"; }
 START_LOCAL="$(fmt_dt "$START_EPOCH")"
 END_LOCAL="$(fmt_dt "$END_EPOCH")"
-banner "🕒 Step 7 — Deployment Time"
+banner "🕒 Step 8 — Deployment Time"
 kv "Start:" "${START_LOCAL}"
 kv "End:"   "${END_LOCAL}"
 
-# =================== Enable APIs ===================
-banner "⚙️ Step 8 — Enable APIs"
+# =================== Step 9: Enable APIs ===================
+banner "⚙️ Step 9 — Enable APIs"
 run_with_progress "Enabling CloudRun & Build APIs" \
   gcloud services enable run.googleapis.com cloudbuild.googleapis.com --quiet
 
-# =================== Deploy ===================
-banner "🚀 Step 9 — Deploying to Cloud Run"
+# =================== Step 10: Deploy ===================
+banner "🚀 Step 10 — Deploying to Cloud Run"
 run_with_progress "Deploying ${SERVICE}" \
   gcloud run deploy "$SERVICE" \
     --image="$IMAGE" \
@@ -244,40 +267,44 @@ run_with_progress "Deploying ${SERVICE}" \
     --allow-unauthenticated \
     --port="$PORT" \
     --min-instances=1 \
+    --set-env-vars="$ENV_VARS" \
     --quiet
 
-# =================== Result ===================
+# =================== Step 11: Result ===================
 PROJECT_NUMBER="$(gcloud projects describe "$PROJECT" --format='value(projectNumber)')" || true
 CANONICAL_HOST="${SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
 URL_CANONICAL="https://${CANONICAL_HOST}"
-banner "✅ Result"
+banner "✅ Step 11 — Result"
 ok "Service Ready"
 kv "URL:" "${C_CYAN}${BOLD}${URL_CANONICAL}${RESET}"
 
-# =================== Protocol URLs ===================
-TROJAN_PASS="Trojan-2025"
-VLESS_UUID="0c890000-4733-b20e-067f-fc341bd20000"
-VLESS_UUID_GRPC="0c890000-4733-4a0e-9a7f-fc341bd20000"
-VMESS_UUID="0c890000-4733-b20e-067f-fc341bd20000"
+# =================== Step 12: Protocol URLs (Dynamic) ===================
+banner "🔗 Step 12 — Generate Access Keys"
 
+# URL Path ကို Encoded လုပ်ခြင်း
+VLESS_PATH_ENCODED="$(printf "%s" "$VLESS_PATH" | jq -sRr @uri)" || VLESS_PATH_ENCODED="%2FKP-CHANNEL"
+
+# VMess URI ဖန်တီးသည့် Function
 make_vmess_ws_uri(){
   local host="$1"
+  local path_enc="$2"
   local json=$(cat <<JSON
-{"v":"2","ps":"VMess-WS","add":"vpn.googleapis.com","port":"443","id":"${VMESS_UUID}","aid":"0","scy":"zero","net":"ws","type":"none","host":"${host}","path":"/KP-CHANNEL","tls":"tls","sni":"vpn.googleapis.com","alpn":"http/1.1","fp":"randomized"}
+{"v":"2","ps":"VMess-WS","add":"${host}","port":"443","id":"${VLESS_UUID}","aid":"0","scy":"auto","net":"ws","type":"none","host":"${host}","path":"${path_enc}","tls":"tls","sni":"${host}","alpn":"http/1.1","fp":"auto"}
 JSON
 )
-  base64 <<<"$json" | tr -d '\n' | sed 's/^/vmess:\/\//'
+  # -w0 သည် base64 output ရှိ Line break များကို ဖယ်ရှားသည်။
+  base64 -w0 <<<"$json" | sed 's/^/vmess:\/\//'
 }
 
 case "$PROTO" in
-  trojan-ws)  URI="trojan://${TROJAN_PASS}@vpn.googleapis.com:443?path=%2FKP-CHANNEL&security=tls&host=${CANONICAL_HOST}&type=ws#KP CHANNEL MYTEL BYPASS GCP" ;;
-  vless-ws)   URI="vless://${VLESS_UUID}@vpn.googleapis.com:443?path=%2FKP-CHANNEL&security=tls&encryption=none&host=${CANONICAL_HOST}&type=ws#KP CHANNEL MYTEL BYPASS GCP" ;;
-  vless-grpc) URI="vless://${VLESS_UUID_GRPC}@vpn.googleapis.com:443?mode=gun&security=tls&encryption=none&type=grpc&serviceName=kpchannel-grpc&sni=${CANONICAL_HOST}#KP CHANNEL MYTEL BYPASS GCP" ;;
-  vmess-ws)   URI="$(make_vmess_ws_uri "${CANONICAL_HOST}")" ;;
+  trojan-ws)  URI="trojan://${TROJAN_PASS}@${CANONICAL_HOST}:443?path=${VLESS_PATH_ENCODED}&security=tls&host=${CANONICAL_HOST}&type=ws#KP CHANNEL MYTEL BYPASS GCP" ;;
+  vless-ws)   URI="vless://${VLESS_UUID}@${CANONICAL_HOST}:443?path=${VLESS_PATH_ENCODED}&security=tls&encryption=none&host=${CANONICAL_HOST}&type=ws#KP CHANNEL MYTEL BYPASS GCP" ;;
+  vless-grpc) URI="vless://${VLESS_UUID}@${CANONICAL_HOST}:443?mode=gun&security=tls&encryption=none&type=grpc&serviceName=kpchannel-grpc&sni=${CANONICAL_HOST}#KP CHANNEL MYTEL BYPASS GCP" ;;
+  vmess-ws)   URI="$(make_vmess_ws_uri "${CANONICAL_HOST}" "${VLESS_PATH}")" ;;
 esac
 
-# =================== Telegram Notify ===================
-banner "📣 Step 10 — Telegram Notify"
+# =================== Step 13: Telegram Notify ===================
+banner "📣 Step 13 — Telegram Notify"
 
 MSG=$(cat <<EOF
 ✅ <b>CloudRun Deploy Success</b>
@@ -295,5 +322,5 @@ EOF
 
 tg_send "${MSG}"
 
-printf "\n${C_GREEN}${BOLD}✨ Done — Warm Instance Enabled (min=1) | Beautiful Banner UI | Cold Start Prevented${RESET}\n"
+printf "\n${C_GREEN}${BOLD}✨ Done — Random UUID for VLESS/VMess & Trojan Pass = KP-CHANNEL Enabled.${RESET}\n"
 printf "${C_GREY}📄 Log file: ${LOG_FILE}${RESET}\n"
