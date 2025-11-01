@@ -638,4 +638,86 @@ main() {
     END_TIME=$(TZ='Asia/Yangon' date -d "+5 hours" +"%Y-%m-%d %H:%M:%S")
 
     # URI generation
-    VLESS_LINK=$(generate_uri "$DOMAIN"
+    VLESS_LINK=$(generate_uri "$DOMAIN" "$PROTOCOL")
+
+    # ✅ Telegram Message creation 
+    MESSAGE=" *KP CHANNEL MYTEL BYPASS GCP*
+━━━━━━━━━━━━━━━
+\`\`\`
+Protocol: ${PROTOCOL^^}
+Region: ${REGION}
+Resources: ${CPU} CPU | ${MEMORY} RAM
+Timeout: ${TIMEOUT}s
+Domain: ${DOMAIN}
+Path: ${VLESS_PATH}
+
+Start: ${START_TIME}
+End: ${END_TIME}
+\`\`\`
+\`\`\`
+လိုင်းရှယ်ကောင်း
+Singapore Server 🇸🇬🇸🇬🇸🇬
+\`\`\`
+━━━━━━━━━━━━━━━
+*💛 ထို Key အား အဆင်ပြေတဲ့ Vpn မှာ ထည့်သုံးပါ*
+\`\`\`
+${VLESS_LINK}
+\`\`\`
+_အသုံးပြုပုံ: Internet သုံးဆွဲ၍မရသော ဒေသများတွင် Mytel ဖြင့် သုံးဆွဲနိုင်သည်_
+\`\`\`Telegram-Channel\`\`\`
+https://t.me/addlist/DaVvvOWfdg05NDJl
+\`\`\`Telegram-Acc\`\`\`
+@KPBYKP
+\`\`\`🕔🕔🕔\`\`\`"
+
+    # ✅ Console Output Message
+    CONSOLE_MESSAGE="KP CHANNEL MYTEL BYPASS GCP ✅
+━━━━━━━━━━━━━━━
+ Project: ${PROJECT_ID}
+ Protocol: ${PROTOCOL^^}
+ Service: ${SERVICE_NAME}
+ Region: ${REGION}
+ Resources: ${CPU} CPU | ${MEMORY} RAM
+ Timeout: ${TIMEOUT}s
+ Domain: ${DOMAIN}
+ Path: ${VLESS_PATH}
+ 
+ Start Time (MMT): ${START_TIME}
+ End Time (MMT):   ${END_TIME}
+ လိုင်းရှယ်ကောင်း
+ Singapore Server 🇸🇬🇸🇬🇸🇬
+ 
+💛 ထို Key အား အဆင်ပြေတဲ့ Vpn မှာ ထည့်သုံးပါ:
+${VLESS_LINK}
+━━━━━━━━━━━━━━━
+အသုံးပြုပုံ: Internet သုံးဆွဲ၍မရသော ဒေသများတွင် Mytel ဖြင့် သုံးဆွဲနိုင်သည်.
+Telegram-Channel
+https://t.me/addlist/DaVvvOWfdg05NDJl
+Telegram-Acc
+@KPBYKP
+🕔🕔🕔"
+# Save to file
+    echo "$CONSOLE_MESSAGE" > deployment-info.txt
+    log "Deployment info saved to deployment-info.txt"
+    
+    # Display locally
+    echo
+    info "=== Deployment Information ==="
+    echo "$CONSOLE_MESSAGE"
+    echo
+    
+    # Send to Telegram based on user selection
+    if [[ "$TELEGRAM_DESTINATION" != "none" ]]; then
+        log "Sending deployment info to Telegram..."
+        send_deployment_notification "$MESSAGE"
+    else
+        log "Skipping Telegram notification as per user selection"
+    fi
+    
+    log "Deployment completed successfully!"
+    log "Service URL: $SERVICE_URL"
+    log "Configuration saved to: deployment-info.txt"
+}
+
+# Run main function
+main "$@"
