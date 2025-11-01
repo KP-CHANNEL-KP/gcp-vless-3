@@ -6,6 +6,7 @@ set -euo pipefail
 # Ensure necessary tools (uuidgen and jq) are installed for a clean run.
 if ! command -v uuidgen &> /dev/null || ! command -v jq &> /dev/null; then
     echo -e "\033[0;34m[INFO]\033[0m Installing prerequisite packages (uuid-runtime, jq)..."
+    # Suppress output during installation
     sudo apt-get update > /dev/null 2>&1 || true
     sudo apt-get install -y uuid-runtime jq
     echo -e "\033[0;32m[INFO]\033[0m Prerequisites installed."
@@ -54,7 +55,8 @@ validate_uuid() {
 }
 
 validate_path() {
-    local path_pattern='^\/[a-zA-Z0-9_-]{4,20}$'
+    # Path must start with / and contain 4-20 alphanumeric/hyphen/underscore characters
+    local path_pattern='^\/[a-zA-Z0-9_-]{4,20}$' 
     if [[ ! $1 =~ $path_pattern ]]; then
         error "Invalid Path format. Must start with '/' and contain 4-20 alphanumeric characters/hyphens/underscores."
         return 1
@@ -81,11 +83,11 @@ validate_chat_id() {
 
 # --- Configuration/Selection Functions ---
 
-# Protocol selection function (NEW FEATURE 1)
+# Protocol selection function (UPDATED Image Path)
 select_protocol() {
     echo
     info "=== Protocol Selection ==="
-    echo "1. VLESS / WebSockets (Recommended Default) -> Image: kpchannel/vl:latest" 
+    echo "1. VLESS / WebSockets (Recommended Default) -> Image: kpchannel/v1:latest" 
     echo "2. Trojan / WebSockets -> Image: kpchannel/tr:latest" 
     echo "3. VMess / WebSockets -> Image: kpchannel/vmess:latest" 
     echo
@@ -95,7 +97,8 @@ select_protocol() {
         proto_choice=${proto_choice:-"1"}
         
         case $proto_choice in
-            1) PROTO="vless-ws"; IMAGE="docker.io/kpchannel/vl:latest"; break ;;
+            # VLESS Image ကို Error မှ တွေ့ရှိသည့် v1:latest (သို့မဟုတ်) မှန်ကန်သည်ဟု ယူဆရသည့် path ဖြင့် ပြောင်းလဲ
+            1) PROTO="vless-ws"; IMAGE="docker.io/kpchannel/v1:latest"; break ;;
             2) PROTO="trojan-ws"; IMAGE="docker.io/kpchannel/tr:latest"; break ;;
             3) PROTO="vmess-ws"; IMAGE="docker.io/kpchannel/vmess:latest"; break ;;
             *) echo "Invalid selection. Please enter a number between 1-3." ;;
@@ -105,10 +108,11 @@ select_protocol() {
     info "Selected Protocol: ${PROTOCOL^^}"
 }
 
-# Service Timeout selection function (NEW FEATURE 3)
+# Service Timeout selection function (NEW FEATURE)
 select_timeout() {
     echo
     info "=== Service Timeout Configuration ==="
+    echo "This controls how long a connection can be idle before it closes."
     echo "1. 300 seconds (5 minutes)"
     echo "2. 900 seconds (15 minutes)"
     echo "3. 3600 seconds (1 hour) (Maximum Default)" 
@@ -327,7 +331,7 @@ get_user_input() {
         fi
     done
 
-    # Path (Secret URL) Selection (NEW FEATURE 2)
+    # Path (Secret URL) Selection (NEW FEATURE)
     local DEFAULT_PATH="/KP-CHANNEL"
     while true; do
         read -p "Enter Path (Secret URL) [default: ${DEFAULT_PATH}]: " PATH_INPUT
@@ -427,6 +431,7 @@ show_config_summary() {
 generate_uri() {
     local DOMAIN="$1"
     local PROTOCOL="$2"
+    # jq is guaranteed to be installed at the top of the script
     local VLESS_PATH_ENCODED=$(printf "%s" "$VLESS_PATH" | jq -sRr @uri)
     local URI=""
     
@@ -462,16 +467,6 @@ validate_prerequisites() {
         exit 1
     fi
     
-    if ! command -v git &> /dev/null; then
-        error "git is not installed. Please install git."
-        exit 1
-    fi
-    
-    if ! command -v jq &> /dev/null; then
-        error "jq is not installed. Please install jq (JSON processor)."
-        exit 1
-    fi
-    
     local PROJECT_ID=$(gcloud config get-value project)
     if [[ -z "$PROJECT_ID" || "$PROJECT_ID" == "(unset)" ]]; then
         error "No project configured. Run: gcloud config set project PROJECT_ID"
@@ -481,10 +476,8 @@ validate_prerequisites() {
 
 cleanup() {
     log "Cleaning up temporary files..."
-    # The original script cloned a repo, but the new version uses direct docker image deployment,
-    # so we only clean up the cloned directory if it exists (for compatibility)
-    if [[ -d "gcp-vless-2" ]]; then
-        rm -rf gcp-vless-2
+    if [[ -f "deployment-info.txt" ]]; then
+        rm deployment-info.txt
     fi
 }
 
@@ -520,7 +513,6 @@ send_deployment_notification() {
     
     case $TELEGRAM_DESTINATION in
         "channel")
-            log "Sending to Telegram Channel..."
             if send_to_telegram "$TELEGRAM_CHANNEL_ID" "$message"; then
                 log "✅ Successfully sent to Telegram Channel"
                 success_count=$((success_count + 1))
@@ -530,7 +522,6 @@ send_deployment_notification() {
             ;;
             
         "bot")
-            log "Sending to Bot private message..."
             if send_to_telegram "$TELEGRAM_CHAT_ID" "$message"; then
                 log "✅ Successfully sent to Bot private message"
                 success_count=$((success_count + 1))
@@ -540,9 +531,6 @@ send_deployment_notification() {
             ;;
             
         "both")
-            log "Sending to both Channel and Bot..."
-            
-            # Send to Channel
             if send_to_telegram "$TELEGRAM_CHANNEL_ID" "$message"; then
                 log "✅ Successfully sent to Telegram Channel"
                 success_count=$((success_count + 1))
@@ -550,7 +538,6 @@ send_deployment_notification() {
                 error "❌ Failed to send to Telegram Channel"
             fi
             
-            # Send to Bot
             if send_to_telegram "$TELEGRAM_CHAT_ID" "$message"; then
                 log "✅ Successfully sent to Bot private message"
                 success_count=$((success_count + 1))
@@ -594,21 +581,19 @@ main() {
     
     validate_prerequisites
     
-    # Set trap for cleanup (to ensure it runs even if deployment fails)
+    # Set trap for cleanup
     trap cleanup EXIT
     
     # Set environment variables for the Docker image
     local ENV_VARS="UUID=${UUID},PATH=${VLESS_PATH},TROJAN_PASS=${TROJAN_PASS}"
     
     log "Enabling required APIs..."
-    # The previous script had issues with git clone and build, 
-    # so we ensure the deployment is done directly from the public Docker image (kpchannel/*)
     gcloud services enable \
         run.googleapis.com \
         iam.googleapis.com \
         --quiet
     
-    log "Deploying to Cloud Run with image: ${IMAGE}..."
+    log "Deploying service ${SERVICE_NAME} with image: ${IMAGE}..."
     if ! gcloud run deploy ${SERVICE_NAME} \
         --image ${IMAGE} \
         --platform managed \
@@ -696,7 +681,8 @@ https://t.me/addlist/DaVvvOWfdg05NDJl
 Telegram-Acc
 @KPBYKP
 🕔🕔🕔"
-# Save to file
+
+    # Save to file
     echo "$CONSOLE_MESSAGE" > deployment-info.txt
     log "Deployment info saved to deployment-info.txt"
     
