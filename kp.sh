@@ -87,7 +87,7 @@ validate_chat_id() {
 select_protocol() {
     echo
     info "=== Protocol Selection ==="
-    echo "1. VLESS / WebSockets (Recommended Default) -> Image: kpchannel/v1:latest" 
+    echo "1. VLESS / WebSockets (Recommended Default) -> Image: kpchannel/vl:latest" 
     echo "2. Trojan / WebSockets -> Image: kpchannel/tr:latest" 
     echo "3. VMess / WebSockets -> Image: kpchannel/vmess:latest" 
     echo
