@@ -611,7 +611,7 @@ main() {
     
     # Environment Variables for the container
     local TROJAN_PASS="KP-CHANNEL" # Placeholder password for Trojan
-    local ENV_VARS="UUID=${UUID},PATH=${VLESS_PATH},TROJAN_PASS=${TROJAN_PASS},PROTOCOL=${PROTOCOL}" # PROTOCOL added
+    local ENV_VARS="UUID=${UUID},PATH=${VLESS_PATH},TROJAN_PASS=${TROJAN_PASS},PROTOCOL=${PROTOCOL},**PORT=443**" # PROTOCOL added
 
     log "Enabling required APIs..."
     gcloud services enable \
@@ -653,6 +653,8 @@ main() {
         --cpu ${CPU} \
         --memory ${MEMORY} \
         --set-env-vars ${ENV_VARS} \
+        --timeout 3600 \
+
         --quiet; then
         error "Deployment failed"
         exit 1
